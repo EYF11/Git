@@ -26,6 +26,10 @@ target/
 tmp/
 temp/
 
+# Local scratch files
+fruits.txt
+gitignore
+
 # Environment and secrets
 .env
 .env.*
