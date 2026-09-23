@@ -1,7 +1,7 @@
 /**
- * FlClash 中文完整版覆写 v1.2
+ * FlClash 中文完整版覆写 v1.3
  * 适用：FlClash + Mihomo 内核
- * 目标：中文策略组、地区节点手动可选、AI 独立分流、国内直连、广告拦截、Fake-IP + DoH、防 DNS 泄漏取向。
+ * 目标：中文策略组、地区“自动测速 + 手动锁定”双模式、AI 独立分流、国内直连、广告拦截、Fake-IP + DoH、防 DNS 泄漏取向。
  *
  * 重要：
  * 1) FlClash「设置 → 网络 → 覆写 DNS」请关闭。
@@ -11,7 +11,7 @@
  */
 
 const SETTINGS = {
-  // 节点测速
+  // 手机端兼顾稳定、耗电与切换频率：10 分钟复测；差距 <80ms 不频繁换节点。
   TEST_URL: "https://www.gstatic.com/generate_204",
   TEST_INTERVAL: 600,
   TEST_TOLERANCE: 80,
@@ -36,6 +36,7 @@ const GROUP = {
   ADS: "🛑 广告拦截",
   DIRECT: "🎯 国内直连",
   FINAL: "🐟 漏网之鱼",
+
   HK: "🇭🇰 香港节点",
   TW: "🇹🇼 台湾节点",
   JP: "🇯🇵 日本节点",
@@ -44,12 +45,18 @@ const GROUP = {
   KR: "🇰🇷 韩国节点",
   OTHER: "🌍 其他节点",
   ALL: "🧭 全部节点",
+
+  HK_AUTO: "🇭🇰 香港自动",
+  TW_AUTO: "🇹🇼 台湾自动",
+  JP_AUTO: "🇯🇵 日本自动",
+  SG_AUTO: "🇸🇬 新加坡自动",
   US_AUTO: "🇺🇸 美国自动",
+  KR_AUTO: "🇰🇷 韩国自动",
 };
 
 // 常见机场信息/到期/流量节点，不纳入测速池。
 const INFO_FILTER =
-  "(?i)(流量|剩余|到期|套餐|官网|客服|更新|订阅|使用说明|公告|traffic|expire|expiry|官网|网址|联系|邮箱|email)";
+  "(?i)(流量|剩余|到期|套餐|官网|客服|更新|订阅|使用说明|公告|traffic|expire|expiry|网址|联系|邮箱|email)";
 
 const REGION = {
   HK: "(?i)(香港|港|🇭🇰|Hong[ ._-]*Kong|(^|[^A-Za-z])HK([^A-Za-z]|$))",
@@ -64,7 +71,7 @@ const ALL_REGION_FILTER = [REGION.HK, REGION.TW, REGION.JP, REGION.SG, REGION.US
   .map(function (x) { return "(?:" + x.replace(/^\(\?i\)/, "") + ")"; })
   .join("|");
 
-function urlTestGroup(name, filter, fallback) {
+function urlTestGroup(name, filter) {
   const group = {
     name: name,
     type: "url-test",
@@ -74,10 +81,10 @@ function urlTestGroup(name, filter, fallback) {
     tolerance: SETTINGS.TEST_TOLERANCE,
     lazy: true,
     "exclude-filter": INFO_FILTER,
+    // 某地区没有任何可用节点时避免配置组失效。
+    "empty-fallback": "DIRECT",
   };
   if (filter) group.filter = filter;
-  // Mihomo 的 empty-fallback 只允许“代理节点”，不能写策略组名；DIRECT 是内置代理。
-  group["empty-fallback"] = "DIRECT";
   return group;
 }
 
@@ -85,12 +92,14 @@ function selectGroup(name, proxies) {
   return { name: name, type: "select", proxies: proxies };
 }
 
-// 地区组改为 select：进入“美国节点/香港节点”等组后可以明确选择具体节点。
-// 注意：地区匹配仍然依据“节点名称”，不是实时检测出口 IP。
-function manualRegionGroup(name, filter, excludeFilter) {
+// 地区组保留手动 select，同时把对应“XX自动”放在第一项。
+// 新导入时默认自动测速；需要固定 IP/节点时，进入地区组手动锁定具体节点即可。
+// 注意：地区匹配依据节点名称，不是实时检测出口 IP。
+function manualRegionGroup(name, filter, autoGroup, excludeFilter) {
   const group = {
     name: name,
     type: "select",
+    proxies: autoGroup ? [autoGroup] : [],
     "include-all": true,
     filter: filter,
     "exclude-filter": excludeFilter || INFO_FILTER,
@@ -140,22 +149,29 @@ function buildRuleProviders() {
 }
 
 function buildGroups() {
-  const auto = urlTestGroup(GROUP.AUTO, null, "DIRECT");
+  // 全节点自动测速。
+  const auto = urlTestGroup(GROUP.AUTO, null);
 
-  // GPT/AI 专用美国自动测速组
-  const usAuto = urlTestGroup(GROUP.US_AUTO, REGION.US, "DIRECT");
+  // 每个主要地区都提供独立 url-test 自动组。
+  const usAuto = urlTestGroup(GROUP.US_AUTO, REGION.US);
+  const sgAuto = urlTestGroup(GROUP.SG_AUTO, REGION.SG);
+  const jpAuto = urlTestGroup(GROUP.JP_AUTO, REGION.JP);
+  const hkAuto = urlTestGroup(GROUP.HK_AUTO, REGION.HK);
+  const twAuto = urlTestGroup(GROUP.TW_AUTO, REGION.TW);
+  const krAuto = urlTestGroup(GROUP.KR_AUTO, REGION.KR);
 
-  // 地区组改为手动 select，不再让 url-test 在组内自动替你切换。
-  const hk = manualRegionGroup(GROUP.HK, REGION.HK);
-  const tw = manualRegionGroup(GROUP.TW, REGION.TW);
-  const jp = manualRegionGroup(GROUP.JP, REGION.JP);
-  const sg = manualRegionGroup(GROUP.SG, REGION.SG);
-  const us = manualRegionGroup(GROUP.US, REGION.US);
-  const kr = manualRegionGroup(GROUP.KR, REGION.KR);
+  // 地区手动组第一项就是对应自动组；同时仍可手动钉死具体节点。
+  const us = manualRegionGroup(GROUP.US, REGION.US, GROUP.US_AUTO);
+  const sg = manualRegionGroup(GROUP.SG, REGION.SG, GROUP.SG_AUTO);
+  const jp = manualRegionGroup(GROUP.JP, REGION.JP, GROUP.JP_AUTO);
+  const hk = manualRegionGroup(GROUP.HK, REGION.HK, GROUP.HK_AUTO);
+  const tw = manualRegionGroup(GROUP.TW, REGION.TW, GROUP.TW_AUTO);
+  const kr = manualRegionGroup(GROUP.KR, REGION.KR, GROUP.KR_AUTO);
 
   const other = manualRegionGroup(
     GROUP.OTHER,
     ".*",
+    null,
     "(?i)(" + INFO_FILTER.replace(/^\(\?i\)/, "") + "|" + ALL_REGION_FILTER + ")"
   );
 
@@ -169,10 +185,16 @@ function buildGroups() {
   };
 
   return [
+    // 总开关：既能直接选地区自动，也能进入地区手动组。
     selectGroup(GROUP.MAIN, [
       GROUP.AUTO,
-      GROUP.US,
       GROUP.US_AUTO,
+      GROUP.SG_AUTO,
+      GROUP.JP_AUTO,
+      GROUP.HK_AUTO,
+      GROUP.TW_AUTO,
+      GROUP.KR_AUTO,
+      GROUP.US,
       GROUP.SG,
       GROUP.JP,
       GROUP.HK,
@@ -185,6 +207,11 @@ function buildGroups() {
 
     auto,
     usAuto,
+    sgAuto,
+    jpAuto,
+    hkAuto,
+    twAuto,
+    krAuto,
     us,
     sg,
     jp,
@@ -194,16 +221,91 @@ function buildGroups() {
     other,
     allNodes,
 
-    // AI 默认美国自动；也可进入“美国节点”手动钉死某一个具体节点。
-    selectGroup(GROUP.AI, [GROUP.US_AUTO, GROUP.US, GROUP.SG, GROUP.JP, GROUP.AUTO, GROUP.MAIN]),
-    selectGroup(GROUP.GOOGLE, [GROUP.MAIN, GROUP.US, GROUP.US_AUTO, GROUP.SG, GROUP.JP, GROUP.HK]),
-    selectGroup(GROUP.YOUTUBE, [GROUP.MAIN, GROUP.HK, GROUP.SG, GROUP.JP, GROUP.US]),
-    selectGroup(GROUP.TELEGRAM, [GROUP.MAIN, GROUP.SG, GROUP.HK, GROUP.JP, GROUP.US]),
-    selectGroup(GROUP.GITHUB, [GROUP.MAIN, GROUP.AUTO, GROUP.US, GROUP.SG, GROUP.JP]),
-    selectGroup(GROUP.SOCIAL, [GROUP.MAIN, GROUP.SG, GROUP.HK, GROUP.JP, GROUP.US]),
-    selectGroup(GROUP.STREAMING, [GROUP.SG, GROUP.JP, GROUP.US, GROUP.HK, GROUP.MAIN]),
-    selectGroup(GROUP.APPLE, ["DIRECT", GROUP.MAIN, GROUP.HK, GROUP.US]),
-    selectGroup(GROUP.MICROSOFT, ["DIRECT", GROUP.MAIN, GROUP.US, GROUP.SG]),
+    // AI 默认美国自动；也可切换新加坡/日本自动，或进入地区组锁死具体节点。
+    selectGroup(GROUP.AI, [
+      GROUP.US_AUTO,
+      GROUP.SG_AUTO,
+      GROUP.JP_AUTO,
+      GROUP.US,
+      GROUP.SG,
+      GROUP.JP,
+      GROUP.AUTO,
+      GROUP.MAIN,
+    ]),
+
+    selectGroup(GROUP.GOOGLE, [
+      GROUP.MAIN,
+      GROUP.US_AUTO,
+      GROUP.SG_AUTO,
+      GROUP.JP_AUTO,
+      GROUP.HK_AUTO,
+      GROUP.US,
+      GROUP.SG,
+      GROUP.JP,
+      GROUP.HK,
+    ]),
+
+    selectGroup(GROUP.YOUTUBE, [
+      GROUP.MAIN,
+      GROUP.HK_AUTO,
+      GROUP.SG_AUTO,
+      GROUP.JP_AUTO,
+      GROUP.US_AUTO,
+      GROUP.HK,
+      GROUP.SG,
+      GROUP.JP,
+      GROUP.US,
+    ]),
+
+    selectGroup(GROUP.TELEGRAM, [
+      GROUP.MAIN,
+      GROUP.SG_AUTO,
+      GROUP.HK_AUTO,
+      GROUP.JP_AUTO,
+      GROUP.US_AUTO,
+      GROUP.SG,
+      GROUP.HK,
+      GROUP.JP,
+      GROUP.US,
+    ]),
+
+    selectGroup(GROUP.GITHUB, [
+      GROUP.MAIN,
+      GROUP.AUTO,
+      GROUP.US_AUTO,
+      GROUP.SG_AUTO,
+      GROUP.JP_AUTO,
+      GROUP.US,
+      GROUP.SG,
+      GROUP.JP,
+    ]),
+
+    selectGroup(GROUP.SOCIAL, [
+      GROUP.MAIN,
+      GROUP.SG_AUTO,
+      GROUP.HK_AUTO,
+      GROUP.JP_AUTO,
+      GROUP.US_AUTO,
+      GROUP.SG,
+      GROUP.HK,
+      GROUP.JP,
+      GROUP.US,
+    ]),
+
+    selectGroup(GROUP.STREAMING, [
+      GROUP.SG_AUTO,
+      GROUP.JP_AUTO,
+      GROUP.US_AUTO,
+      GROUP.HK_AUTO,
+      GROUP.SG,
+      GROUP.JP,
+      GROUP.US,
+      GROUP.HK,
+      GROUP.MAIN,
+    ]),
+
+    selectGroup(GROUP.APPLE, ["DIRECT", GROUP.MAIN, GROUP.HK_AUTO, GROUP.US_AUTO, GROUP.HK, GROUP.US]),
+    selectGroup(GROUP.MICROSOFT, ["DIRECT", GROUP.MAIN, GROUP.US_AUTO, GROUP.SG_AUTO, GROUP.US, GROUP.SG]),
     selectGroup(GROUP.ADS, ["REJECT", "DIRECT"]),
     selectGroup(GROUP.DIRECT, ["DIRECT", GROUP.MAIN]),
     selectGroup(GROUP.FINAL, [GROUP.MAIN, GROUP.AUTO, "DIRECT"]),
