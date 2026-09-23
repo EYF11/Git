@@ -1,0 +1,64 @@
+name: Deploy temporary Cloudflare geo-check Worker
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/deploy-cloudflare-temp.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy temporary Worker
+        shell: bash
+        env:
+          CI: '1'
+          NO_COLOR: '1'
+        run: |
+          set -euo pipefail
+          cd flclash
+          npx --yes wrangler@latest deploy --temporary --config wrangler.jsonc > /tmp/deploy.log 2>&1
+          claim_url="$(grep -Eo 'https://dash\.cloudflare\.com/claim-preview\?claimToken=[^[:space:]]+' /tmp/deploy.log | tail -n1 || true)"
+          worker_url="$(grep -Eo 'https://[^[:space:]]+\.workers\.dev' /tmp/deploy.log | tail -n1 || true)"
+          test -n "$claim_url"
+          test -n "$worker_url"
+
+          cat > /tmp/public.pem <<'PEM'
+          -----BEGIN PUBLIC KEY-----
+          MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEA11OSr4SYqB4iuA3hVt6A
+          LR1bnPqUv2U/RI0dX3bRlAVgLvcButelffyF2sXWo8G9JGLf63oGGeRAo5SbC73E
+          9xO5QfeEOu812fd9QMC00h1T4n4jK5/tg6SDyv5AM6gLI5BajdrI/wXde7fLdjG0
+          qvMknBYUtMZrIBbk92tpsrTG45R7l5wkGd7Tumc652weK15V1twG78u4DUz/3r38
+          0BplVenX0Wg77QDN82/VKsv7ZNI9E2aOWaCEfHqYeOOMfcHA8/S0UJiTTrx3Oe3f
+          kl5jA9e9H3Hwszb3YI1BbakE66v0bsZw2w4UrOFEeWO1z35NifuPcbFGRFD4/4pD
+          T3PLSLwjaAOuKXhndvWjfuWCxaFzfEqmrOxfzUCUVeeBl1HGeC5nQTjOsxcoIksI
+          pAmNxEH7gYM1YoTqh1Ir/0pHaPuLsH1DHzYzTjPEKKE1mJvX8/6WaLJU3svltm8D
+          MUVHNvXrv0xhJlcR5vYqdRR+OZDIbrF7aYK4NuuwgvIOWF7RTQltU7LQ0btaxYd2
+          vRDitaXGymzsrob4gyp6YnbZN9+omE4CdQE1Mu4vPinwwsklBkDK/D0Yjl9WcmMw
+          G4FKJeOv8EapMaXLCXUPW7jip8Fn4feOtqw8erPLHjCSv/k+oIVDMj8X4r1VvC0D
+          N9VS/VJN+kFbiyGa9zNAyIUCAwEAAQ==
+          -----END PUBLIC KEY-----
+          PEM
+
+          printf '%s' "$claim_url" > /tmp/claim.txt
+          printf '%s' "$worker_url" > /tmp/worker.txt
+          openssl pkeyutl -encrypt -pubin -inkey /tmp/public.pem -in /tmp/claim.txt -out /tmp/claim.bin -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256
+          openssl pkeyutl -encrypt -pubin -inkey /tmp/public.pem -in /tmp/worker.txt -out /tmp/worker.bin -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256
+          base64 -w0 /tmp/claim.bin > claim.b64
+          base64 -w0 /tmp/worker.bin > worker.b64
+
+      - name: Upload encrypted deployment details
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudflare-temp-deploy
+          path: |
+            flclash/claim.b64
+            flclash/worker.b64
+          if-no-files-found: error
+          retention-days: 1
