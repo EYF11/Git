@@ -1,5 +1,5 @@
 /**
- * FlClash 中文完整版覆写 v1.6
+ * FlClash 中文完整版覆写 v1.7
  * 适用：FlClash + Mihomo 内核
  * 目标：中文策略组、地区自动/手动双模式、Chrome Gemini 稳定出口、
  *      美国节点误标防护、可选真实美国出口检测、AI 独立分流、Fake-IP + DoH。
@@ -18,11 +18,9 @@ const SETTINGS = {
   TEST_INTERVAL: 600,
   TEST_TOLERANCE: 80,
 
-  // 真实美国出口检测端点（可选）。
-  // 要求：美国来源返回 HTTP 204，非美国返回非 204。
-  // 部署仓库中的 flclash/us-geo-check-worker.js 后，把 /us 地址填到这里。
-  // 留空时不会伪装成“真实美国检测”，而是使用下方候选组。
-  US_GEO_TEST_URL: "",
+  // 真实美国出口检测端点：美国来源返回 HTTP 204，非美国返回非 204。
+  // 已接入 Cloudflare Worker；用于自动剔除“节点名是美国、实际出口不是美国”的节点。
+  US_GEO_TEST_URL: "https://flclash-us-geo-check.shining-distance-c7e.workers.dev/us",
 
   // 已人工确认真实美国出口的节点名正则。留空则不生成“✅ 美国已验证”组。
   // 示例："(?i)(美国高速 22|美国ISP家宽 12)"
