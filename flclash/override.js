@@ -1,13 +1,14 @@
 /**
- * FlClash 中文完整版覆写 v1.4
+ * FlClash 中文完整版覆写 v1.5
  * 适用：FlClash + Mihomo 内核
- * 目标：中文策略组、地区“自动测速 + 手动锁定”双模式、Gemini 美国专组、AI 独立分流、国内直连、广告拦截、Fake-IP + DoH、防 DNS 泄漏取向。
+ * 目标：中文策略组、地区“自动测速 + 手动锁定”双模式、Chrome Gemini 稳定美国出口、AI 独立分流、国内直连、广告拦截、Fake-IP + DoH、防 DNS 泄漏取向。
  *
  * 重要：
  * 1) FlClash「设置 → 网络 → 覆写 DNS」请关闭。
  * 2) FlClash「追加系统 DNS」请关闭。
- * 3) 出站模式请使用「规则」；Android 推荐 TUN 模式。
- * 4) 本脚本降低 DNS 泄漏风险，但不能隐藏 TLS SNI、目标 IP 等所有网络元数据。
+ * 3) 出站模式请使用「规则」；Android 由系统 VPN/TUN 接管流量。
+ * 4) IPv6 建议关闭；本脚本也会关闭 Mihomo 顶层与 DNS IPv6。
+ * 5) 本脚本降低 DNS 泄漏风险，但不能隐藏 TLS SNI、目标 IP 等所有网络元数据。
  */
 
 const SETTINGS = {
@@ -27,7 +28,9 @@ const GROUP = {
   AUTO: "♻️ 自动选择",
   AI: "🤖 AI 服务",
   GEMINI: "💎 Gemini",
-  GEMINI_US: "🇺🇸 Gemini美国",
+  CHROME_GEMINI: "🧩 Chrome Gemini",
+  GEMINI_US_STABLE: "🇺🇸 Gemini美国稳定",
+  GEMINI_US_AUTO: "🇺🇸 Gemini美国自动",
   GOOGLE: "🔍 Google",
   YOUTUBE: "📺 YouTube",
   TELEGRAM: "✈️ Telegram",
@@ -75,15 +78,35 @@ const ALL_REGION_FILTER = [REGION.HK, REGION.TW, REGION.JP, REGION.SG, REGION.US
   .join("|");
 
 function urlTestGroup(name, filter, url, expectedStatus, emptyFallback) {
+  const testUrl = url || SETTINGS.TEST_URL;
   const group = {
     name: name,
     type: "url-test",
     "include-all": true,
-    url: url || SETTINGS.TEST_URL,
+    url: testUrl,
     interval: SETTINGS.TEST_INTERVAL,
     tolerance: SETTINGS.TEST_TOLERANCE,
     lazy: true,
     "exclude-filter": INFO_FILTER,
+    "exclude-type": "direct",
+    "empty-fallback": emptyFallback || "DIRECT",
+  };
+  if (filter) group.filter = filter;
+  if (expectedStatus) group["expected-status"] = expectedStatus;
+  else if (testUrl === SETTINGS.TEST_URL) group["expected-status"] = "204";
+  return group;
+}
+
+function fallbackGroup(name, filter, url, expectedStatus, emptyFallback) {
+  const group = {
+    name: name,
+    type: "fallback",
+    "include-all": true,
+    url: url || SETTINGS.TEST_URL,
+    interval: SETTINGS.TEST_INTERVAL,
+    lazy: true,
+    "exclude-filter": INFO_FILTER,
+    "exclude-type": "direct",
     "empty-fallback": emptyFallback || "DIRECT",
   };
   if (filter) group.filter = filter;
@@ -131,6 +154,7 @@ function buildRuleProviders() {
     private_domain: provider("private_domain", "domain", "private.mrs", base + "geosite/private.mrs"),
     ads_domain: provider("ads_domain", "domain", "category-ads-all.mrs", base + "geosite/category-ads-all.mrs"),
     ai_domain: provider("ai_domain", "domain", "category-ai-!cn.mrs", base + "geosite/category-ai-!cn.mrs"),
+    gemini_domain: provider("gemini_domain", "domain", "google-gemini.mrs", base + "geosite/google-gemini.mrs"),
     google_domain: provider("google_domain", "domain", "google.mrs", base + "geosite/google.mrs"),
     youtube_domain: provider("youtube_domain", "domain", "youtube.mrs", base + "geosite/youtube.mrs"),
     telegram_domain: provider("telegram_domain", "domain", "telegram.mrs", base + "geosite/telegram.mrs"),
@@ -163,11 +187,18 @@ function buildGroups() {
   const twAuto = urlTestGroup(GROUP.TW_AUTO, REGION.TW);
   const krAuto = urlTestGroup(GROUP.KR_AUTO, REGION.KR);
 
-  // Gemini 美国候选组：只纳入美国节点，并直接用 Gemini 官网做健康检查。
-  // expected-status 只能判断 HTTP 可达性，不能读取网页正文，因此它不是“100% 解锁证明”。
-  // 若所有候选均失败则 REJECT，避免 Gemini 意外回落到 DIRECT 暴露本地出口。
-  const geminiUs = urlTestGroup(
-    GROUP.GEMINI_US,
+  // Gemini 美国“稳定”优先保持同一可用出口，仅当前节点失败才切换。
+  // “自动”则会在 Gemini 实站可达的美国节点中按延迟择优。
+  // HTTP 可达不等于 Google 已确认该账号/设备具备 Chrome Gemini 功能资格。
+  const geminiUsStable = fallbackGroup(
+    GROUP.GEMINI_US_STABLE,
+    REGION.US,
+    SETTINGS.GEMINI_TEST_URL,
+    "200-399",
+    "REJECT"
+  );
+  const geminiUsAuto = urlTestGroup(
+    GROUP.GEMINI_US_AUTO,
     REGION.US,
     SETTINGS.GEMINI_TEST_URL,
     "200-399",
@@ -199,9 +230,10 @@ function buildGroups() {
   };
 
   return [
-    // 总开关：既能直接选地区自动，也能进入地区手动组。
+    // 总开关。
     selectGroup(GROUP.MAIN, [
       GROUP.AUTO,
+      GROUP.CHROME_GEMINI,
       GROUP.US_AUTO,
       GROUP.SG_AUTO,
       GROUP.JP_AUTO,
@@ -226,7 +258,8 @@ function buildGroups() {
     hkAuto,
     twAuto,
     krAuto,
-    geminiUs,
+    geminiUsStable,
+    geminiUsAuto,
     us,
     sg,
     jp,
@@ -236,15 +269,23 @@ function buildGroups() {
     other,
     allNodes,
 
-    // Gemini 默认使用专门的美国实站测速组；保留手动美国节点和其他自动组作为备用。
-    selectGroup(GROUP.GEMINI, [
-      GROUP.GEMINI_US,
-      GROUP.US_AUTO,
+    // Chrome Gemini：默认“稳定美国”，尽量让 Gemini、Google 搜索与账号相关请求保持同一美国出口。
+    selectGroup(GROUP.CHROME_GEMINI, [
+      GROUP.GEMINI_US_STABLE,
+      GROUP.GEMINI_US_AUTO,
       GROUP.US,
+      GROUP.US_AUTO,
+    ]),
+
+    // Gemini Web / API 默认跟随 Chrome Gemini 的同一出口。
+    selectGroup(GROUP.GEMINI, [
+      GROUP.CHROME_GEMINI,
+      GROUP.GEMINI_US_STABLE,
+      GROUP.GEMINI_US_AUTO,
+      GROUP.US,
+      GROUP.US_AUTO,
       GROUP.SG_AUTO,
       GROUP.JP_AUTO,
-      GROUP.AUTO,
-      GROUP.MAIN,
     ]),
 
     // 其他 AI 默认美国自动；也可切换新加坡/日本自动，或进入地区组锁死具体节点。
@@ -259,7 +300,9 @@ function buildGroups() {
       GROUP.MAIN,
     ]),
 
+    // Google 默认也跟随 Chrome Gemini，避免 Google Search/AI Mode 与 Gemini 侧栏落到不同国家出口。
     selectGroup(GROUP.GOOGLE, [
+      GROUP.CHROME_GEMINI,
       GROUP.MAIN,
       GROUP.US_AUTO,
       GROUP.SG_AUTO,
@@ -340,7 +383,7 @@ function buildGroups() {
 
 function buildRules() {
   const rules = [
-    // 局域网与广告优先
+    // 局域网与广告优先。
     "RULE-SET,private_domain,DIRECT",
     "RULE-SET,private_ip,DIRECT,no-resolve",
     "RULE-SET,ads_domain," + GROUP.ADS,
@@ -359,7 +402,9 @@ function buildRules() {
     "DOMAIN-SUFFIX,ping0.cc," + GROUP.MAIN,
     "DOMAIN-SUFFIX,ip111.cn," + GROUP.MAIN,
 
-    // Gemini 必须放在通用 AI / Google 规则前面，避免先被 ai_domain/google_domain 捕获。
+    // Gemini 规则必须放在通用 AI / Google 前面。
+    // 使用 MetaCubeX 的 Gemini 规则集，并保留关键域名作为兜底。
+    "RULE-SET,gemini_domain," + GROUP.GEMINI,
     "DOMAIN-SUFFIX,gemini.google.com," + GROUP.GEMINI,
     "DOMAIN-SUFFIX,bard.google.com," + GROUP.GEMINI,
     "DOMAIN-SUFFIX,aistudio.google.com," + GROUP.GEMINI,
@@ -367,7 +412,7 @@ function buildRules() {
     "DOMAIN-SUFFIX,ai.google.dev," + GROUP.GEMINI,
     "DOMAIN-SUFFIX,generativelanguage.googleapis.com," + GROUP.GEMINI,
 
-    // AI / 开发 / 通讯
+    // AI / 开发 / 通讯。
     "RULE-SET,ai_domain," + GROUP.AI,
     "DOMAIN-SUFFIX,openai.com," + GROUP.AI,
     "DOMAIN-SUFFIX,chatgpt.com," + GROUP.AI,
@@ -382,25 +427,25 @@ function buildRules() {
     "RULE-SET,telegram_domain," + GROUP.TELEGRAM,
     "RULE-SET,telegram_ip," + GROUP.TELEGRAM + ",no-resolve",
 
-    // Google / YouTube
+    // Google / YouTube。Google 默认走 Chrome Gemini 组，保持区域一致。
     "RULE-SET,youtube_domain," + GROUP.YOUTUBE,
     "RULE-SET,google_domain," + GROUP.GOOGLE,
 
-    // 海外社交
+    // 海外社交。
     "RULE-SET,twitter_domain," + GROUP.SOCIAL,
     "RULE-SET,facebook_domain," + GROUP.SOCIAL,
     "RULE-SET,instagram_domain," + GROUP.SOCIAL,
 
-    // 流媒体
+    // 流媒体。
     "RULE-SET,netflix_domain," + GROUP.STREAMING,
     "RULE-SET,spotify_domain," + GROUP.STREAMING,
     "RULE-SET,proxymedia_domain," + GROUP.STREAMING,
 
-    // 厂商服务（默认可直连，可在策略组手动切换）
+    // 厂商服务（默认可直连，可在策略组手动切换）。
     "RULE-SET,apple_domain," + GROUP.APPLE,
     "RULE-SET,microsoft_domain," + GROUP.MICROSOFT,
 
-    // 国际域名 / 中国域名
+    // 国际域名 / 中国域名。
     "RULE-SET,geolocation_non_cn," + GROUP.MAIN,
     "RULE-SET,cn_domain," + GROUP.DIRECT,
     "RULE-SET,cn_ip," + GROUP.DIRECT + ",no-resolve",
@@ -422,6 +467,7 @@ function buildDns() {
   ];
 
   // 明确通过主策略组访问国际 DoH，避免境外域名查询直接落到本地 DNS。
+  // 不把 DoH 自身绑定到 Chrome Gemini，避免健康检查时形成策略循环。
   const globalDoh = [
     "https://1.1.1.1/dns-query#" + GROUP.MAIN,
     "https://8.8.8.8/dns-query#" + GROUP.MAIN,
@@ -463,6 +509,7 @@ function buildDns() {
     "nameserver-policy": {
       "rule-set:private_domain": cnDoh,
       "rule-set:cn_domain": cnDoh,
+      "rule-set:gemini_domain": globalDoh,
       "rule-set:ai_domain": globalDoh,
       "rule-set:google_domain": globalDoh,
       "rule-set:youtube_domain": globalDoh,
@@ -487,6 +534,14 @@ function main(config) {
   config["rule-providers"] = buildRuleProviders();
   config.rules = buildRules();
   config.dns = buildDns();
+
+  // 与当前“关闭 IPv6”的使用取向保持一致。
+  config.ipv6 = false;
+
+  // 记住手动策略选择与 Fake-IP 映射，降低重启后的出口变化。
+  if (!config.profile || typeof config.profile !== "object") config.profile = {};
+  config.profile["store-selected"] = true;
+  config.profile["store-fake-ip"] = true;
 
   // 一些温和的连接参数；FlClash 若有同名 App 设置，最终以 App 为准。
   config["unified-delay"] = true;
