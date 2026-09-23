@@ -1,33 +1,33 @@
 /**
- * FlClash 中文完整版覆写 v1.7
+ * FlClash 中文完整版覆写 v1.8
  * 适用：FlClash + Mihomo 内核
- * 目标：中文策略组、地区自动/手动双模式、Chrome Gemini 稳定出口、
- *      美国节点误标防护、可选真实美国出口检测、AI 独立分流、Fake-IP + DoH。
+ * 目标：中文精简策略组、地区自动/手动双模式、Gemini/Chrome Gemini 独立分流、
+ *      美国出口地理验证、AI 独立分流、广告拦截、Fake-IP + DoH、防 DNS 泄漏取向。
  *
  * 重要：
  * 1) FlClash「设置 → 网络 → 覆写 DNS」关闭。
  * 2) FlClash「追加系统 DNS」关闭。
  * 3) 出站模式使用「规则」；Android 由系统 VPN/TUN 接管。
  * 4) IPv6 建议关闭；本脚本同时关闭 Mihomo 顶层与 DNS IPv6。
- * 5) 仅靠节点名称无法证明真实出口国家。真正自动识别需要一个按来源国家返回不同 HTTP 状态的检测端点。
+ * 5) “美国地理自动”只证明出口位于美国，不等于 Gemini 一定可用。
+ * 6) Gemini 最稳妥的方式仍是手动固定已实测可用节点，并依赖 store-selected 记忆选择。
  */
 
 const SETTINGS = {
   TEST_URL: "https://www.gstatic.com/generate_204",
-  GEMINI_TEST_URL: "https://gemini.google.com/",
   TEST_INTERVAL: 600,
   TEST_TOLERANCE: 80,
 
-  // 真实美国出口检测端点：美国来源返回 HTTP 204，非美国返回非 204。
-  // 已接入 Cloudflare Worker；用于自动剔除“节点名是美国、实际出口不是美国”的节点。
+  // 美国来源返回 HTTP 204，非美国返回非 204。
+  // 仅用于验证真实出口国家，不用于判断 Gemini 是否解锁。
   US_GEO_TEST_URL: "https://flclash-us-geo-check.shining-distance-c7e.workers.dev/us",
 
-  // 已人工确认真实美国出口的节点名正则。留空则不生成“✅ 美国已验证”组。
-  // 示例："(?i)(美国高速 22|美国ISP家宽 12)"
-  VERIFIED_US_FILTER: "",
+  // 只填“人工实测 Gemini / Gemini in Chrome 可正常使用”的节点名正则。
+  // 留空则不生成“✅ Gemini 已验证”组。
+  // 示例："(?i)(美国高速 22|美国高速 24)"
+  VERIFIED_GEMINI_FILTER: "",
 
-  // 已确认误标/不希望进入美国自动池的节点。可继续追加，用 | 分隔。
-  // 当前把截图中实际出口为香港的“延迟≠速度美国三网优化...”排除。
+  // 已确认误标/不希望进入美国普通自动池的节点。可继续追加，用 | 分隔。
   US_EXCLUDE_FILTER: "(?i)(延迟≠速度美国三网优化)",
 
   BLOCK_QUIC: false,
@@ -39,11 +39,8 @@ const GROUP = {
   AI: "🤖 AI 服务",
   GEMINI: "💎 Gemini",
   CHROME_GEMINI: "🧩 Chrome Gemini",
-  US_VERIFIED: "✅ 美国已验证",
-  US_TRUE_STABLE: "🇺🇸 美国真实稳定",
-  US_TRUE_AUTO: "🇺🇸 美国真实自动",
-  US_CANDIDATE_STABLE: "🇺🇸 美国候选稳定",
-  US_CANDIDATE_AUTO: "🇺🇸 美国候选自动",
+  GEMINI_VERIFIED: "✅ Gemini 已验证",
+  US_GEO_AUTO: "🇺🇸 美国地理自动",
   GOOGLE: "🔍 Google",
   YOUTUBE: "📺 YouTube",
   TELEGRAM: "✈️ Telegram",
@@ -125,23 +122,6 @@ function urlTestGroup(name, filter, url, expectedStatus, emptyFallback, excludeF
   return group;
 }
 
-function fallbackGroup(name, filter, url, expectedStatus, emptyFallback, excludeFilter) {
-  const group = {
-    name: name,
-    type: "fallback",
-    "include-all": true,
-    url: url || SETTINGS.TEST_URL,
-    interval: SETTINGS.TEST_INTERVAL,
-    lazy: true,
-    "exclude-filter": excludeFilter || INFO_FILTER,
-    "exclude-type": "direct",
-    "empty-fallback": emptyFallback || "DIRECT",
-  };
-  if (filter) group.filter = filter;
-  if (expectedStatus) group["expected-status"] = expectedStatus;
-  return group;
-}
-
 function selectGroup(name, proxies) {
   return { name: name, type: "select", proxies: proxies };
 }
@@ -208,83 +188,20 @@ function buildGroups() {
   const twAuto = urlTestGroup(GROUP.TW_AUTO, REGION.TW);
   const krAuto = urlTestGroup(GROUP.KR_AUTO, REGION.KR);
 
-  // 候选组：节点名像美国 + Gemini 实站可达，但不声称真实出口一定在美国。
-  const usCandidateStable = fallbackGroup(
-    GROUP.US_CANDIDATE_STABLE,
-    REGION.US,
-    SETTINGS.GEMINI_TEST_URL,
-    "200-399",
-    "REJECT",
-    US_EXCLUDE
-  );
-  const usCandidateAuto = urlTestGroup(
-    GROUP.US_CANDIDATE_AUTO,
-    REGION.US,
-    SETTINGS.GEMINI_TEST_URL,
-    "200-399",
-    "REJECT",
-    US_EXCLUDE
-  );
+  const groups = [auto, usAuto, sgAuto, jpAuto, hkAuto, twAuto, krAuto];
 
-  const groups = [
-    auto, usAuto, sgAuto, jpAuto, hkAuto, twAuto, krAuto,
-    usCandidateStable, usCandidateAuto,
-  ];
-
-  const chromeOptions = [];
-  const geminiOptions = [];
-
-  // 人工白名单：只在设置了正则时生成，避免“已验证”名不副实。
-  if (SETTINGS.VERIFIED_US_FILTER) {
-    const verified = manualRegionGroup(
-      GROUP.US_VERIFIED,
-      SETTINGS.VERIFIED_US_FILTER,
-      null,
-      INFO_FILTER
-    );
-    groups.push(verified);
-    chromeOptions.push(GROUP.US_VERIFIED);
-    geminiOptions.push(GROUP.US_VERIFIED);
-  }
-
-  // 真正自动的来源国家检查：只有配置了专用检测端点才生成。
+  // 美国地理自动：验证真实出口在美国后，再在通过验证的节点里自动择优。
+  // 这里只验证出口国家，不宣称 Gemini 一定可用。
   if (SETTINGS.US_GEO_TEST_URL) {
-    const usTrueStable = fallbackGroup(
-      GROUP.US_TRUE_STABLE,
+    groups.push(urlTestGroup(
+      GROUP.US_GEO_AUTO,
       REGION.US,
       SETTINGS.US_GEO_TEST_URL,
       "204",
       "REJECT",
       US_EXCLUDE
-    );
-    const usTrueAuto = urlTestGroup(
-      GROUP.US_TRUE_AUTO,
-      REGION.US,
-      SETTINGS.US_GEO_TEST_URL,
-      "204",
-      "REJECT",
-      US_EXCLUDE
-    );
-    groups.push(usTrueStable, usTrueAuto);
-    chromeOptions.push(GROUP.US_TRUE_STABLE, GROUP.US_TRUE_AUTO);
-    geminiOptions.push(GROUP.US_TRUE_STABLE, GROUP.US_TRUE_AUTO);
+    ));
   }
-
-  chromeOptions.push(
-    GROUP.US_CANDIDATE_STABLE,
-    GROUP.US_CANDIDATE_AUTO,
-    GROUP.US,
-    GROUP.US_AUTO
-  );
-  geminiOptions.push(
-    GROUP.CHROME_GEMINI,
-    GROUP.US_CANDIDATE_STABLE,
-    GROUP.US_CANDIDATE_AUTO,
-    GROUP.US,
-    GROUP.US_AUTO,
-    GROUP.SG_AUTO,
-    GROUP.JP_AUTO
-  );
 
   const us = manualRegionGroup(GROUP.US, REGION.US, GROUP.US_AUTO, US_EXCLUDE);
   const sg = manualRegionGroup(GROUP.SG, REGION.SG, GROUP.SG_AUTO);
@@ -311,9 +228,50 @@ function buildGroups() {
 
   groups.push(us, sg, jp, hk, tw, kr, other, allNodes);
 
-  const main = selectGroup(GROUP.MAIN, [
+  const chromeOptions = [];
+  const geminiOptions = [];
+
+  // 已验证 Gemini 节点只来自人工实测白名单，不再用 HTTP 200-399 冒充“可用验证”。
+  if (SETTINGS.VERIFIED_GEMINI_FILTER) {
+    const verified = manualRegionGroup(
+      GROUP.GEMINI_VERIFIED,
+      SETTINGS.VERIFIED_GEMINI_FILTER,
+      null,
+      INFO_FILTER
+    );
+    groups.push(verified);
+    chromeOptions.push(GROUP.GEMINI_VERIFIED);
+    geminiOptions.push(GROUP.GEMINI_VERIFIED);
+  }
+
+  // AI/Gemini 保持 select：优先固定稳定节点，避免频繁切换出口 IP。
+  // “美国地理自动”只是备选，不当作 Gemini 已验证组。
+  chromeOptions.push(GROUP.US);
+  if (SETTINGS.US_GEO_TEST_URL) chromeOptions.push(GROUP.US_GEO_AUTO);
+  chromeOptions.push(
+    GROUP.US_AUTO,
+    GROUP.SG,
+    GROUP.JP,
+    GROUP.SG_AUTO,
+    GROUP.JP_AUTO
+  );
+
+  geminiOptions.push(GROUP.CHROME_GEMINI, GROUP.US);
+  if (SETTINGS.US_GEO_TEST_URL) geminiOptions.push(GROUP.US_GEO_AUTO);
+  geminiOptions.push(
+    GROUP.US_AUTO,
+    GROUP.SG,
+    GROUP.JP,
+    GROUP.SG_AUTO,
+    GROUP.JP_AUTO
+  );
+
+  const mainOptions = [
     GROUP.AUTO,
     GROUP.CHROME_GEMINI,
+  ];
+  if (SETTINGS.US_GEO_TEST_URL) mainOptions.push(GROUP.US_GEO_AUTO);
+  mainOptions.push(
     GROUP.US_AUTO,
     GROUP.SG_AUTO,
     GROUP.JP_AUTO,
@@ -328,9 +286,10 @@ function buildGroups() {
     GROUP.KR,
     GROUP.OTHER,
     GROUP.ALL,
-    "DIRECT",
-  ]);
+    "DIRECT"
+  );
 
+  const main = selectGroup(GROUP.MAIN, mainOptions);
   const chromeGemini = selectGroup(GROUP.CHROME_GEMINI, chromeOptions);
   const gemini = selectGroup(GROUP.GEMINI, geminiOptions);
 
@@ -341,12 +300,12 @@ function buildGroups() {
     gemini,
 
     selectGroup(GROUP.AI, [
-      GROUP.US_AUTO,
-      GROUP.SG_AUTO,
-      GROUP.JP_AUTO,
       GROUP.US,
       GROUP.SG,
       GROUP.JP,
+      GROUP.US_AUTO,
+      GROUP.SG_AUTO,
+      GROUP.JP_AUTO,
       GROUP.AUTO,
       GROUP.MAIN,
     ]),
