@@ -1,7 +1,7 @@
 /**
- * FlClash 中文完整版覆写 v1.3
+ * FlClash 中文完整版覆写 v1.4
  * 适用：FlClash + Mihomo 内核
- * 目标：中文策略组、地区“自动测速 + 手动锁定”双模式、AI 独立分流、国内直连、广告拦截、Fake-IP + DoH、防 DNS 泄漏取向。
+ * 目标：中文策略组、地区“自动测速 + 手动锁定”双模式、Gemini 美国专组、AI 独立分流、国内直连、广告拦截、Fake-IP + DoH、防 DNS 泄漏取向。
  *
  * 重要：
  * 1) FlClash「设置 → 网络 → 覆写 DNS」请关闭。
@@ -13,6 +13,7 @@
 const SETTINGS = {
   // 手机端兼顾稳定、耗电与切换频率：10 分钟复测；差距 <80ms 不频繁换节点。
   TEST_URL: "https://www.gstatic.com/generate_204",
+  GEMINI_TEST_URL: "https://gemini.google.com/",
   TEST_INTERVAL: 600,
   TEST_TOLERANCE: 80,
 
@@ -25,6 +26,8 @@ const GROUP = {
   MAIN: "🚀 节点选择",
   AUTO: "♻️ 自动选择",
   AI: "🤖 AI 服务",
+  GEMINI: "💎 Gemini",
+  GEMINI_US: "🇺🇸 Gemini美国",
   GOOGLE: "🔍 Google",
   YOUTUBE: "📺 YouTube",
   TELEGRAM: "✈️ Telegram",
@@ -71,20 +74,20 @@ const ALL_REGION_FILTER = [REGION.HK, REGION.TW, REGION.JP, REGION.SG, REGION.US
   .map(function (x) { return "(?:" + x.replace(/^\(\?i\)/, "") + ")"; })
   .join("|");
 
-function urlTestGroup(name, filter) {
+function urlTestGroup(name, filter, url, expectedStatus, emptyFallback) {
   const group = {
     name: name,
     type: "url-test",
     "include-all": true,
-    url: SETTINGS.TEST_URL,
+    url: url || SETTINGS.TEST_URL,
     interval: SETTINGS.TEST_INTERVAL,
     tolerance: SETTINGS.TEST_TOLERANCE,
     lazy: true,
     "exclude-filter": INFO_FILTER,
-    // 某地区没有任何可用节点时避免配置组失效。
-    "empty-fallback": "DIRECT",
+    "empty-fallback": emptyFallback || "DIRECT",
   };
   if (filter) group.filter = filter;
+  if (expectedStatus) group["expected-status"] = expectedStatus;
   return group;
 }
 
@@ -160,6 +163,17 @@ function buildGroups() {
   const twAuto = urlTestGroup(GROUP.TW_AUTO, REGION.TW);
   const krAuto = urlTestGroup(GROUP.KR_AUTO, REGION.KR);
 
+  // Gemini 美国候选组：只纳入美国节点，并直接用 Gemini 官网做健康检查。
+  // expected-status 只能判断 HTTP 可达性，不能读取网页正文，因此它不是“100% 解锁证明”。
+  // 若所有候选均失败则 REJECT，避免 Gemini 意外回落到 DIRECT 暴露本地出口。
+  const geminiUs = urlTestGroup(
+    GROUP.GEMINI_US,
+    REGION.US,
+    SETTINGS.GEMINI_TEST_URL,
+    "200-399",
+    "REJECT"
+  );
+
   // 地区手动组第一项就是对应自动组；同时仍可手动钉死具体节点。
   const us = manualRegionGroup(GROUP.US, REGION.US, GROUP.US_AUTO);
   const sg = manualRegionGroup(GROUP.SG, REGION.SG, GROUP.SG_AUTO);
@@ -212,6 +226,7 @@ function buildGroups() {
     hkAuto,
     twAuto,
     krAuto,
+    geminiUs,
     us,
     sg,
     jp,
@@ -221,7 +236,18 @@ function buildGroups() {
     other,
     allNodes,
 
-    // AI 默认美国自动；也可切换新加坡/日本自动，或进入地区组锁死具体节点。
+    // Gemini 默认使用专门的美国实站测速组；保留手动美国节点和其他自动组作为备用。
+    selectGroup(GROUP.GEMINI, [
+      GROUP.GEMINI_US,
+      GROUP.US_AUTO,
+      GROUP.US,
+      GROUP.SG_AUTO,
+      GROUP.JP_AUTO,
+      GROUP.AUTO,
+      GROUP.MAIN,
+    ]),
+
+    // 其他 AI 默认美国自动；也可切换新加坡/日本自动，或进入地区组锁死具体节点。
     selectGroup(GROUP.AI, [
       GROUP.US_AUTO,
       GROUP.SG_AUTO,
@@ -332,6 +358,14 @@ function buildRules() {
     "DOMAIN-SUFFIX,browserleaks.com," + GROUP.MAIN,
     "DOMAIN-SUFFIX,ping0.cc," + GROUP.MAIN,
     "DOMAIN-SUFFIX,ip111.cn," + GROUP.MAIN,
+
+    // Gemini 必须放在通用 AI / Google 规则前面，避免先被 ai_domain/google_domain 捕获。
+    "DOMAIN-SUFFIX,gemini.google.com," + GROUP.GEMINI,
+    "DOMAIN-SUFFIX,bard.google.com," + GROUP.GEMINI,
+    "DOMAIN-SUFFIX,aistudio.google.com," + GROUP.GEMINI,
+    "DOMAIN-SUFFIX,makersuite.google.com," + GROUP.GEMINI,
+    "DOMAIN-SUFFIX,ai.google.dev," + GROUP.GEMINI,
+    "DOMAIN-SUFFIX,generativelanguage.googleapis.com," + GROUP.GEMINI,
 
     // AI / 开发 / 通讯
     "RULE-SET,ai_domain," + GROUP.AI,
